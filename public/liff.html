@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>打卡 LIFF</title>
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <style>
+    :root { --primary:#06C755; --error:#FF4B4B; --warning:#FF9F00; --bg:#F4F6F9; }
+    body{font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial; background:var(--bg); margin:0; display:flex; align-items:center; justify-content:center; height:100vh; color:#222}
+    .card{background:#fff;width:92%;max-width:460px;padding:28px;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,0.08);text-align:center}
+    .icon-box{height:84px;margin-bottom:18px;display:flex;justify-content:center;align-items:center;font-size:56px}
+    .spinner{width:48px;height:48px;border:4px solid #f3f3f3;border-top:4px solid var(--primary);border-radius:50%;animation:spin 1s linear infinite}
+    .icon{display:none;font-weight:700}
+    .success{color:var(--primary)}
+    .error{color:var(--error)}
+    .warning{color:var(--warning)}
+    h2{margin:0 0 8px 0;font-size:20px}
+    p{margin:0 0 12px 0;color:#666;font-size:14px;line-height:1.5;white-space:pre-line}
+    .meta{font-size:13px;color:#555;margin-top:8px}
+    .coords{font-family:monospace;background:#f7f7f7;padding:8px;border-radius:8px;margin-top:8px}
+    .small{font-size:12px;color:#999;margin-top:8px}
+    .btn-row{display:flex;gap:10px;justify-content:center;margin-top:12px;flex-wrap:wrap}
+    .btn{padding:10px 14px;border-radius:10px;border:none;cursor:pointer;background:var(--primary);color:#fff;font-weight:600}
+    .btn.secondary{background:#eee;color:#333}
+    .btn.ghost{background:transparent;border:1px solid #eee;color:#333}
+    a.map-link{display:inline-block;margin-top:8px;color:var(--primary);text-decoration:none;font-weight:600}
+    @keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
+    @keyframes popIn{0%{transform:scale(0)}80%{transform:scale(1.05)}100%{transform:scale(1)}}
+    @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
+  </style>
+</head>
+<body>
+  <div class="card" role="main" aria-live="polite">
+    <div class="icon-box" aria-hidden="true">
+      <div id="spinner" class="spinner" title="loading"></div>
+      <div id="iconSuccess" class="icon success" style="font-size:48px">✓</div>
+      <div id="iconError" class="icon error" style="font-size:48px">✕</div>
+      <div id="iconWarning" class="icon warning" style="font-size:48px">!</div>
+    </div>
+
+    <h2 id="title">系統連線中...</h2>
+    <p id="msg">正在初始化 LIFF，請稍候</p>
+
+    <div id="info" style="display:none">
+      <div class="meta" id="companyLabel">公司位置</div>
+      <div class="coords" id="companyCoords">lat: --, lng: --</div>
+      <div class="meta" id="userLabel">您的位置</div>
+      <div class="coords" id="userCoords">lat: --, lng: --</div>
+      <div class="meta" id="distanceLabel">距離</div>
+      <div class="coords" id="distanceText">-- 公尺</div>
+      <a id="mapLink" class="map-link" href="#" target="_blank" rel="noopener">在地圖中開啟公司位置</a>
+    </div>
+
+    <div class="btn-row" id="btnRow" style="display:none">
+      <button id="btnSend" class="btn">傳送到聊天室</button>
+      <button id="btnShare" class="btn secondary">分享給其他人</button>
+      <button id="btnClose" class="btn ghost">關閉</button>
+    </div>
+
+    <div class="small" id="hint">請在 LINE App 中開啟以獲得最佳體驗。若無法定位，請確認裝置定位權限已開啟。</div>
+  </div>
+
+  <script>
+    // Configuration: loaded from backend `/config` (set these in Cloud Run environment variables)
+    let LIFF_ID = '';
+    let CLOUD_RUN_URL = '/liff-clock';
+    let OFFICE_LAT = 25.040004;
+    let OFFICE_LNG = 121.513060;
+    let MAX_DISTANCE = 100;
+    let AUTO_CLOSE_MS = 1000;
+
+    // Load runtime config from backend (non-sensitive values)
+    async function loadConfig() {
+      try {
+        const resp = await fetch('/config', { cache: 'no-store' });
+        if (!resp.ok) return;
+        const cfg = await resp.json();
+        if (cfg.liffId) LIFF_ID = cfg.liffId;
+        if (cfg.cloudRunUrl) CLOUD_RUN_URL = cfg.cloudRunUrl;
+        if (typeof cfg.officeLat !== 'undefined') OFFICE_LAT = Number(cfg.officeLat);
+        if (typeof cfg.officeLng !== 'undefined') OFFICE_LNG = Number(cfg.officeLng);
+        if (typeof cfg.maxDistance !== 'undefined') MAX_DISTANCE = Number(cfg.maxDistance);
+        if (typeof cfg.autoCloseMs !== 'undefined') AUTO_CLOSE_MS = Number(cfg.autoCloseMs);
+      } catch (e) {
+        console.warn('loadConfig failed', e);
+      }
+    }
+
+    // UI 元件
+    const uiTitle = document.getElementById('title');
+    const uiMsg = document.getElementById('msg');
+    const uiSpinner = document.getElementById('spinner');
+    const btnRow = document.getElementById('btnRow');
+    const btnSend = document.getElementById('btnSend');
+    const btnShare = document.getElementById('btnShare');
+    const btnClose = document.getElementById('btnClose');
+    const iconSuccess = document.getElementById('iconSuccess');
+    const iconError = document.getElementById('iconError');
+    const iconWarning = document.getElementById('iconWarning');
+    const infoBox = document.getElementById('info');
+    const companyCoordsEl = document.getElementById('companyCoords');
+    const userCoordsEl = document.getElementById('userCoords');
+    const distanceTextEl = document.getElementById('distanceText');
+    const mapLinkEl = document.getElementById('mapLink');
+
+    // 解析 URL 參數（type: clock_in / clock_out / auto）
+    const urlParams = new URLSearchParams(window.location.search);
+    const actionType = (urlParams.get('type') || 'auto').toLowerCase();
+
+    if (actionType === 'clock_in') uiTitle.innerText = "☀️ 正在打上班卡";
+    else if (actionType === 'clock_out') uiTitle.innerText = "🌙 正在打下班卡";
+    else uiTitle.innerText = "📍 自動判斷打卡中";
+
+    // Haversine 距離（公尺）
+    function getDistanceMeters(lat1, lon1, lat2, lon2) {
+      const R = 6371000;
+      const toRad = x => x * Math.PI / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      return R * c;
+    }
+
+    // 初始化 LIFF 並執行主流程
+    async function main() {
+      try {
+        await loadConfig();
+        await liff.init({ liffId: LIFF_ID });
+      } catch (err) {
+        showUI('error', 'LIFF 初始化失敗', err.message || '無法初始化 LIFF');
+        return;
+      }
+
+      // 取得 profile（若 scope 有 profile）
+      let profile = null;
+      try {
+        if (liff.isLoggedIn && liff.getProfile) {
+          profile = await liff.getProfile().catch(() => null);
+        } else {
+          const ctx = liff.getContext ? liff.getContext() : null;
+          if (ctx && ctx.userId) profile = { userId: ctx.userId };
+        }
+      } catch (err) {
+        profile = null;
+      }
+
+      uiMsg.innerText = "正在取得定位...";
+      if (!('geolocation' in navigator)) {
+        showUI('error', '定位不支援', '此裝置或瀏覽器不支援定位功能，請在 LINE App 中開啟。');
+        return;
+      }
+
+      navigator.geolocation.getCurrentPosition(async (pos) => {
+        uiMsg.innerText = "正在與伺服器通訊...";
+        const userLat = pos.coords.latitude;
+        const userLng = pos.coords.longitude;
+        const distance = getDistanceMeters(userLat, userLng, OFFICE_LAT, OFFICE_LNG);
+        // 更新 UI 顯示公司位置與距離
+        companyCoordsEl.innerText = `lat: ${OFFICE_LAT.toFixed(6)}, lng: ${OFFICE_LNG.toFixed(6)}`;
+        userCoordsEl.innerText = `lat: ${userLat.toFixed(6)}, lng: ${userLng.toFixed(6)}`;
+        distanceTextEl.innerText = `${Math.round(distance)} 公尺`;
+        mapLinkEl.href = `https://www.google.com/maps/search/?api=1&query=${OFFICE_LAT},${OFFICE_LNG}`;
+        infoBox.style.display = 'block';
+
+        // 準備要送到後端的 payload
+        const payload = {
+          userId: profile && profile.userId ? profile.userId : (liff.getContext ? (liff.getContext().userId || null) : null),
+          username: profile && profile.displayName ? profile.displayName : (profile && profile.userId ? profile.userId : 'unknown'),
+          latitude: userLat,
+          longitude: userLng,
+          source: 'LIFF_UI',
+          type: actionType
+        };
+
+        // 若距離超過 MAX_DISTANCE，先在前端提示（後端仍會驗證）
+        if (distance > MAX_DISTANCE) {
+          showUI('warning', '距離超出範圍', `您距離公司 ${Math.round(distance)} 公尺（允許 ${MAX_DISTANCE} 公尺）`);
+        } else {
+          showUI('success', '距離檢查通過', `您距離公司 ${Math.round(distance)} 公尺`);
+        }
+
+        // 顯示按鈕
+        btnRow.style.display = 'flex';
+        btnSend.onclick = async () => {
+          // 先呼叫後端，後端會寫入 Google Sheet
+          await postClock(payload);
+        };
+        btnShare.onclick = async () => {
+          // 只分享目前顯示的資訊
+          const text = `${payload.username} 打卡結果：\n${actionType === 'clock_in' ? '上班' : actionType === 'clock_out' ? '下班' : '打卡'}\n時間：${new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })}\n距離：${Math.round(distance)} 公尺\n公司座標：${OFFICE_LAT.toFixed(6)}, ${OFFICE_LNG.toFixed(6)}`;
+          await shareResult(text);
+          setTimeout(() => safeClose(), AUTO_CLOSE_MS);
+        };
+        btnClose.onclick = () => safeClose();
+
+        // 自動呼叫後端（可視需求註解掉）
+        // await postClock(payload);
+
+      }, (err) => {
+        console.error('geolocation error', err);
+        showUI('error', '定位失敗', '請確認裝置 GPS 已開啟並允許定位權限，或在 LINE App 中開啟此 LIFF。');
+      }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 });
+    }
+
+    // 呼叫後端 /liff-clock 並處理回應
+    async function postClock(payload) {
+      try {
+        uiMsg.innerText = '正在送出打卡資料...';
+        const resp = await fetch(CLOUD_RUN_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await resp.json().catch(() => ({ status: 'error', message: '伺服器回傳非 JSON' }));
+        // 若後端回傳包含 lat/lng 與距離，可顯示更精確資訊
+        handleResult(data, payload);
+      } catch (err) {
+        console.error('postClock error', err);
+        showUI('error', '網路錯誤', '無法連線到伺服器，請稍後再試。');
+      }
+    }
+
+    // 處理後端回傳結果（並顯示公司位置與使用者距離）
+    function handleResult(data, payload) {
+      if (!data || typeof data !== 'object') {
+        showUI('error', '伺服器錯誤', '伺服器回傳格式錯誤');
+        return;
+      }
+
+      // 若後端回傳 lat/lng，更新顯示（可用於顯示伺服器判定位置）
+      if (data.lat && data.lng) {
+        companyCoordsEl.innerText = `lat: ${OFFICE_LAT.toFixed(6)}, lng: ${OFFICE_LNG.toFixed(6)}`;
+        userCoordsEl.innerText = `lat: ${Number(data.lat).toFixed(6)}, lng: ${Number(data.lng).toFixed(6)}`;
+      }
+
+      // 若後端回傳距離，顯示；否則前端已計算
+      if (data.distance) distanceTextEl.innerText = `${Math.round(data.distance)} 公尺`;
+
+      if (data.status === 'success') {
+        showUI('success', '打卡成功', data.message || '已完成打卡');
+        // 優先嘗試在 LINE client 自動發訊息（若有權限）
+        if (liff.isInClient() && typeof liff.sendMessages === 'function') {
+          (async () => {
+            try {
+              await liff.sendMessages([{ type: 'text', text: data.message || '打卡成功' }]);
+            } catch (e) { /* ignore */ }
+            setTimeout(() => safeClose(), AUTO_CLOSE_MS);
+          })();
+        } else {
+          // 顯示按鈕讓使用者手動發送或分享
+          btnRow.style.display = 'flex';
+        }
+        return;
+      }
+
+      if (data.status === 'warning') {
+        showUI('warning', '注意', data.message || '請注意');
+        btnRow.style.display = 'flex';
+        return;
+      }
+
+      // error
+      showUI('error', '打卡失敗', data.message || '打卡失敗');
+      btnRow.style.display = 'flex';
+    }
+
+    // 顯示 UI 狀態
+    function showUI(type, title, message) {
+      uiSpinner.style.display = 'none';
+      iconSuccess.style.display = 'none';
+      iconError.style.display = 'none';
+      iconWarning.style.display = 'none';
+
+      uiTitle.innerText = title;
+      uiMsg.innerText = message;
+
+      if (type === 'success') iconSuccess.style.display = 'block';
+      else if (type === 'warning') iconWarning.style.display = 'block';
+      else iconError.style.display = 'block';
+    }
+
+    // 安全關閉 LIFF 視窗（在非 LINE client 時嘗試 fallback）
+    function safeClose() {
+      try {
+        liff.closeWindow();
+      } catch (e) {
+        try { window.location.href = 'about:blank'; } catch (e2) { /* ignore */ }
+      }
+    }
+
+    // 在 LINE client 中發訊息到聊天室（需要 chat_message.write）
+    async function sendToChat(messages) {
+      try {
+        if (liff.isInClient() && typeof liff.sendMessages === 'function') {
+          await liff.sendMessages(messages);
+        } else {
+          if (typeof liff.shareTargetPicker === 'function') {
+            await liff.shareTargetPicker(messages);
+          } else {
+            alert('無法直接發送訊息，請在 LINE App 中開啟或使用分享功能。');
+          }
+        }
+      } catch (err) {
+        console.error('sendToChat error', err);
+      }
+    }
+
+    // 使用 shareTargetPicker 分享（需在 LIFF 設定啟用 shareTargetPicker）
+    async function shareResult(text) {
+      try {
+        const messages = [{ type: 'text', text }];
+        if (typeof liff.shareTargetPicker === 'function') {
+          await liff.shareTargetPicker(messages);
+        } else {
+          if (liff.isInClient() && typeof liff.sendMessages === 'function') {
+            await liff.sendMessages(messages);
+          } else {
+            alert('分享功能不可用，請在 LINE App 中開啟此 LIFF。');
+          }
+        }
+      } catch (err) {
+        console.warn('shareResult failed', err);
+      }
+    }
+
+    // 啟動
+    window.addEventListener('load', main);
+  </script>
+</body>
+</html>
